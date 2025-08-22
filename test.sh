@@ -12,7 +12,7 @@ generate_uuid() {
     elif command -v python3 &> /dev/null; then
         python3 -c "import uuid; print(str(uuid.uuid4()))"
     else
-        hexdump -n 16 -e '4/4 "%08X" 1 "\n"' /dev/urandom | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1\2\3\4-\5\6-\7\8-\9\10-\11\12\13\14\15\16/' | tr '[:upper:]' '[:lower:]'
+        hexdump -n 16 -e '4/4 "%08X" 1 "\n"' /dev/urandom | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1\2\3\4-\5\6-\7\8-\9\10-\11\12\13\14\15\16/' | tr '[:upper:]' '[:lower:]'
     fi
 }
 
@@ -29,6 +29,7 @@ echo
 echo -e "${GREEN}本脚本基于 eooce 大佬的 Python Xray Argo 项目开发${NC}"
 echo -e "${GREEN}提供极速和完整两种配置模式，简化部署流程${NC}"
 echo -e "${GREEN}支持自动UUID生成、后台运行、节点信息输出${NC}"
+echo -e "${GREEN}新增YouTube分流功能，可独立配置分流端口${NC}"
 echo
 
 echo -e "${YELLOW}请选择配置模式:${NC}"
@@ -239,6 +240,96 @@ else
             fi
             echo -e "${GREEN}Telegram配置已设置${NC}"
         fi
+
+        echo -e "${YELLOW}=== YouTube分流配置 ===${NC}"
+        echo -e "${YELLOW}是否启用YouTube分流功能? (y/n)${NC}"
+        read -p "> " YOUTUBE_PROXY_INPUT
+        if [ "$YOUTUBE_PROXY_INPUT" = "y" ] || [ "$YOUTUBE_PROXY_INPUT" = "Y" ]; then
+            echo -e "${GREEN}YouTube分流功能已启用${NC}"
+            
+            echo -e "${YELLOW}请输入YouTube分流端口 (留空使用默认8080): " YOUTUBE_PORT_INPUT
+            read -p "> " YOUTUBE_PORT_INPUT
+            if [ -z "$YOUTUBE_PORT_INPUT" ]; then
+                YOUTUBE_PORT_INPUT="8080"
+            fi
+            
+            # 检查app.py中是否已有YouTube分流配置，如果没有则添加
+            if ! grep -q "YOUTUBE_PROXY" app.py; then
+                echo -e "${YELLOW}正在添加YouTube分流配置到app.py...${NC}"
+                # 在文件末尾添加YouTube分流配置
+                cat >> app.py << 'EOF'
+
+# YouTube分流配置
+YOUTUBE_PROXY = os.environ.get('YOUTUBE_PROXY', 'true')
+YOUTUBE_PORT = int(os.environ.get('YOUTUBE_PORT', 8080))
+
+if YOUTUBE_PROXY == 'true':
+    import threading
+    import socket
+    import select
+    
+    def youtube_proxy_handler(client_socket, target_host, target_port):
+        try:
+            target_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target_socket.connect((target_host, target_port))
+            
+            while True:
+                r, w, e = select.select([client_socket, target_socket], [], [], 1)
+                if not r:
+                    break
+                    
+                for sock in r:
+                    other = target_socket if sock is client_socket else client_socket
+                    try:
+                        data = sock.recv(4096)
+                        if not data:
+                            return
+                        other.send(data)
+                    except:
+                        return
+        except:
+            pass
+        finally:
+            client_socket.close()
+            target_socket.close()
+    
+    def youtube_proxy_server():
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('0.0.0.0', YOUTUBE_PORT))
+        server.listen(5)
+        
+        while True:
+            try:
+                client, addr = server.accept()
+                thread = threading.Thread(target=youtube_proxy_handler, args=(client, '127.0.0.1', int(PORT)))
+                thread.daemon = True
+                thread.start()
+            except:
+                break
+        
+        server.close()
+    
+    # 启动YouTube分流服务
+    youtube_thread = threading.Thread(target=youtube_proxy_server)
+    youtube_thread.daemon = True
+    youtube_thread.start()
+    print(f"YouTube分流服务已启动，端口: {YOUTUBE_PORT}")
+EOF
+            fi
+            
+            # 设置环境变量
+            sed -i "s/YOUTUBE_PROXY = os.environ.get('YOUTUBE_PROXY', '[^']*')/YOUTUBE_PROXY = os.environ.get('YOUTUBE_PROXY', 'true')/" app.py
+            sed -i "s/YOUTUBE_PORT = int(os.environ.get('YOUTUBE_PORT', [0-9]*))/YOUTUBE_PORT = int(os.environ.get('YOUTUBE_PORT', $YOUTUBE_PORT_INPUT))/" app.py
+            
+            echo -e "${GREEN}YouTube分流端口已设置为: $YOUTUBE_PORT_INPUT${NC}"
+            echo -e "${GREEN}YouTube分流功能配置完成！${NC}"
+        else
+            echo -e "${YELLOW}YouTube分流功能已禁用${NC}"
+            if grep -q "YOUTUBE_PROXY" app.py; then
+                sed -i "s/YOUTUBE_PROXY = os.environ.get('YOUTUBE_PROXY', '[^']*')/YOUTUBE_PROXY = os.environ.get('YOUTUBE_PROXY', 'false')/" app.py
+            fi
+        fi
     fi
 
     echo
@@ -252,6 +343,15 @@ echo -e "服务端口: $(grep "PORT = int" app.py | grep -o "or [0-9]*" | cut -d
 echo -e "优选IP: $(grep "CFIP = " app.py | cut -d"'" -f4)"
 echo -e "优选端口: $(grep "CFPORT = " app.py | cut -d"'" -f4)"
 echo -e "订阅路径: $(grep "SUB_PATH = " app.py | cut -d"'" -f4)"
+if grep -q "YOUTUBE_PROXY" app.py; then
+    YOUTUBE_STATUS=$(grep "YOUTUBE_PROXY = " app.py | cut -d"'" -f4)
+    if [ "$YOUTUBE_STATUS" = "true" ]; then
+        YOUTUBE_PORT=$(grep "YOUTUBE_PORT = " app.py | grep -o "[0-9]*" | head -1)
+        echo -e "YouTube分流: ${GREEN}启用 (端口: $YOUTUBE_PORT)${NC}"
+    else
+        echo -e "YouTube分流: ${RED}禁用${NC}"
+    fi
+fi
 echo -e "${YELLOW}========================${NC}"
 echo
 
@@ -302,6 +402,13 @@ echo -e "进程PID: ${BLUE}$APP_PID${NC}"
 echo -e "服务端口: ${BLUE}$SERVICE_PORT${NC}"
 echo -e "UUID: ${BLUE}$CURRENT_UUID${NC}"
 echo -e "订阅路径: ${BLUE}/$SUB_PATH_VALUE${NC}"
+if grep -q "YOUTUBE_PROXY" app.py; then
+    YOUTUBE_STATUS=$(grep "YOUTUBE_PROXY = " app.py | cut -d"'" -f4)
+    if [ "$YOUTUBE_STATUS" = "true" ]; then
+        YOUTUBE_PORT=$(grep "YOUTUBE_PORT = " app.py | grep -o "[0-9]*" | head -1)
+        echo -e "YouTube分流端口: ${BLUE}$YOUTUBE_PORT${NC}"
+    fi
+fi
 echo
 
 echo -e "${YELLOW}=== 访问地址 ===${NC}"
@@ -310,10 +417,24 @@ if command -v curl &> /dev/null; then
     if [ "$PUBLIC_IP" != "获取失败" ]; then
         echo -e "订阅地址: ${GREEN}http://$PUBLIC_IP:$SERVICE_PORT/$SUB_PATH_VALUE${NC}"
         echo -e "管理面板: ${GREEN}http://$PUBLIC_IP:$SERVICE_PORT${NC}"
+        if grep -q "YOUTUBE_PROXY" app.py; then
+            YOUTUBE_STATUS=$(grep "YOUTUBE_PROXY = " app.py | cut -d"'" -f4)
+            if [ "$YOUTUBE_STATUS" = "true" ]; then
+                YOUTUBE_PORT=$(grep "YOUTUBE_PORT = " app.py | grep -o "[0-9]*" | head -1)
+                echo -e "YouTube分流: ${GREEN}http://$PUBLIC_IP:$YOUTUBE_PORT${NC}"
+            fi
+        fi
     fi
 fi
 echo -e "本地订阅: ${GREEN}http://localhost:$SERVICE_PORT/$SUB_PATH_VALUE${NC}"
 echo -e "本地面板: ${GREEN}http://localhost:$SERVICE_PORT${NC}"
+if grep -q "YOUTUBE_PROXY" app.py; then
+    YOUTUBE_STATUS=$(grep "YOUTUBE_PROXY = " app.py | cut -d"'" -f4)
+    if [ "$YOUTUBE_STATUS" = "true" ]; then
+        YOUTUBE_PORT=$(grep "YOUTUBE_PORT = " app.py | grep -o "[0-9]*" | head -1)
+        echo -e "本地YouTube分流: ${GREEN}http://localhost:$YOUTUBE_PORT${NC}"
+    fi
+fi
 echo
 
 if [ -n "$NODE_INFO" ]; then
